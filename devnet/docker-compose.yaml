@@ -1,0 +1,144 @@
+services:
+  geth:
+    container_name: l1-geth
+    image: ethereum/client-go:stable
+    ports:
+      - "8545:8545"
+      - "127.0.0.1:8551:8551"
+      - "8546:8546"
+      - "127.0.0.1:30303:30303"
+    volumes:
+      - "datadir:/datadir"
+      - "./l1/config:/config"
+    command:
+      - --networkid=31337
+      - --http
+      - --datadir=/datadir
+      - --http.addr=0.0.0.0
+      - --authrpc.vhosts=*
+      - --authrpc.port=8551
+      - --authrpc.addr=0.0.0.0
+      - --authrpc.jwtsecret=/config/jwt.txt
+      - --http.vhosts=*
+      - --http.api=eth,net,web3,debug,txpool
+      - --http.corsdomain=*
+      - --ws
+      - --ws.addr=0.0.0.0
+      - --ws.api=eth,net,web3,debug,txpool
+      - --ws.origins=*
+      - --allow-insecure-unlock
+      - --nodiscover
+      - --syncmode=full
+      - --state.scheme=hash
+      - --miner.recommit=5s
+      - --gcmode=archive
+    depends_on:
+      create_geth_genesis:
+        condition: service_completed_successfully
+    networks:
+      -  eth-l1-devnet-network
+
+  # Creates a genesis state for the beacon chain using a YAML configuration file and
+  # a deterministic set of validators
+  # TODO: Make num validators customizable
+  create_geth_genesis:
+    image: "ethereum/client-go:v1.15.6"
+    command:
+      - init
+      - --cache.preimages=true
+      - --state.scheme=hash
+      - --datadir=/datadir/ 
+      - /config/l1genesis.json
+    volumes:
+      - "datadir:/datadir"
+      - "./l1/config:/config"
+    depends_on:
+      create_beacon_chain_genesis:
+        condition: service_completed_successfully
+
+  # Creates a genesis state for the beacon chain using a YAML configuration file and
+  # a deterministic set of validators
+  # TODO: Make num validators customizable
+  create_beacon_chain_genesis:
+    image: "gcr.io/prysmaticlabs/prysm/cmd/prysmctl:v6.0.3"
+    command:
+      - testnet
+      - generate-genesis
+      - --fork=electra
+      - --num-validators=1
+      - --genesis-time-delay=15
+      - --output-ssz=/consensus/genesis.ssz
+      - --chain-config-file=/config/prysm.yaml
+      - --geth-genesis-json-in=/config/l1genesis_template.json
+      - --geth-genesis-json-out=/config/l1genesis.json
+    volumes:
+      - "consensus:/consensus"
+      - "./l1/config:/config"
+
+  # Runs a Prysm beacon chain from a specified genesis state created in the previous step
+  # and connects to go-ethereum in the same network as the execution client.
+  # The account used in go-ethereum is set as the suggested fee recipient for transactions
+  # proposed via the validators attached to the beacon node.
+  prysm_beacon_chain:
+    container_name: l1-prysm-beacon
+    image: "gcr.io/prysmaticlabs/prysm/beacon-chain:stable"
+    command:
+      - --datadir=/consensus/beacondata
+      - --rpc-port=5000
+      - --http-cors-domain=*
+      - --min-sync-peers=0
+      - --genesis-state=/consensus/genesis.ssz
+      - --interop-eth1data-votes
+      - --bootstrap-node=
+      - --contract-deployment-block=0
+      - --minimum-peers-per-subnet=0
+      - --chain-config-file=/config/prysm.yaml
+      - --rpc-host=0.0.0.0
+      - --grpc-gateway-host=0.0.0.0
+      - --chain-id=31337
+      - --execution-endpoint=/datadir/geth.ipc
+      - --accept-terms-of-use
+      - --suggested-fee-recipient=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+    depends_on:
+      geth:
+        condition: service_started
+      create_beacon_chain_genesis:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:5000:5000"
+      - "3500:3500"
+    volumes:
+      - "consensus:/consensus"
+      - "datadir:/datadir"
+      - "./l1/config:/config"
+    networks:
+      -  eth-l1-devnet-network
+
+  # We run a validator client with 64, deterministically-generated keys that match
+  # The validator keys present in the beacon chain genesis state generated a few steps above.
+  prysm_validator:
+    container_name: l1-prysm-validator
+    image: "gcr.io/prysmaticlabs/prysm/validator:v6.0.3"
+    command:
+      - --beacon-rpc-provider=prysm_beacon_chain:5000
+      - --datadir=/consensus/validatordata
+      - --accept-terms-of-use
+      - --interop-num-validators=1
+      - --interop-start-index=0
+      - --chain-config-file=/config/prysm.yaml
+      - --disable-duties-polling
+    depends_on:
+      prysm_beacon_chain:
+        condition: service_started
+    volumes:
+      - "consensus:/consensus"
+      - "./l1/config:/config"
+    networks:
+      -  eth-l1-devnet-network
+
+volumes:
+  consensus:
+  datadir:
+
+networks:
+  eth-l1-devnet-network:
